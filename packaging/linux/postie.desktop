@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Postie
+GenericName=Mail
+Comment=Read and send email
+Exec=postie %u
+Icon=postie
+Terminal=false
+Categories=Network;Email;Office;
+MimeType=x-scheme-handler/mailto;
+StartupWMClass=postie
+Keywords=email;mail;inbox;outlook;

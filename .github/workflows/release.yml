@@ -1,0 +1,202 @@
+name: Release
+
+# To publish a new version, open Actions › Release › Run workflow and pick which part of the
+# version goes up. The workflow tests main, builds Postie-x.y.z.AppImage with the new version,
+# and only once it has built does it commit the version to main, tag it and publish the release.
+# If anything fails, nothing is pushed. The Jar offers the update on its next check.
+#
+# Postie is Linux only for now: the tray, notifications and start-at-login are written for Linux
+# desktops.
+#
+# Pull requests and pushes to main are tested and built the same way, without releasing.
+# Pushing a tag like v0.2.0 by hand still works too: that tag is built and its files are
+# attached to its release, which is created as a pre-release if it doesn't exist yet.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version goes up. "current" releases the version already in Cargo.toml.
+        type: choice
+        options: [patch, minor, major, current]
+        default: patch
+      prerelease:
+        description: Mark it as a pre-release
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# Two releases at once would race for the same version number.
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && 'publish' || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  version:
+    name: Work out the version
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - name: Only from main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Releases are made from main. This run was started on $GITHUB_REF_NAME."
+          exit 1
+
+      - uses: actions/checkout@v7
+
+      - name: Bump it, or read it
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            version=$(python3 scripts/bump-version.py "$BUMP")
+            if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+              echo "::error::v$version already exists. Pick patch, minor or major to make a new version."
+              exit 1
+            fi
+            echo "tag=v$version" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+            if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+              echo "::error::Cargo.toml says $version, so the files would not be named for $GITHUB_REF_NAME."
+              exit 1
+            fi
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Version: $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+
+      # The later jobs build from these, so they all agree on the new version.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: version
+          path: |
+            Cargo.toml
+            Cargo.lock
+          retention-days: 7
+
+  build:
+    name: Build on ${{ matrix.os }}
+    needs: version
+    strategy:
+      matrix:
+        include:
+          # The oldest supported Ubuntu, so the AppImage runs on older glibc too.
+          - os: ubuntu-22.04
+            artifact: linux
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: version
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Read the version
+        run: echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
+
+      - run: cargo build --release --locked
+
+      - name: Package the AppImage
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract > /dev/null
+          APPIMAGETOOL="$PWD/squashfs-root/AppRun" packaging/linux/build-appimage.sh "$VERSION"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish the release
+    needs: [version, build]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      PRERELEASE: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'workflow_dispatch'
+      - uses: actions/download-artifact@v8
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: version
+
+      - name: Commit the version and tag it
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            # "current": the version was already on main, so only the tag is new.
+            git tag "$TAG"
+            git push origin "$TAG"
+            exit 0
+          fi
+          git commit -am "Release ${TAG#v}"
+          git tag "$TAG"
+          # Both or neither. If main has moved on since this run started, this fails and
+          # nothing is published; run it again.
+          git push --atomic origin HEAD:main "$TAG"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux
+          path: files
+
+      - name: Publish
+        working-directory: files
+        run: |
+          sha256sum *
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" * --clobber
+            exit 0
+          fi
+          # Made as a draft with its files, then published, so The Jar never sees it half-uploaded.
+          flags=(--draft --verify-tag --generate-notes --title "Postie ${TAG#v}")
+          if [ "$PRERELEASE" = true ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" * "${flags[@]}"
+          gh release edit "$TAG" --draft=false
