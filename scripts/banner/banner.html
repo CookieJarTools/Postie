@@ -1,0 +1,187 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  /* The house tokens, as in src/gui/theme.rs and GameBridge's banner. */
+  @font-face { font-family: 'Inter'; src: url('../../assets/fonts/InterVariable.ttf'); font-weight: 100 900; }
+  :root {
+    --bg: #08090a; --bg-soft: #0c0d0f; --bg-panel: #131416; --bg-hover: #1a1b1e; --bg-active: #202124;
+    --line: #1f2023; --line-strong: #2a2c30;
+    --fg: #f7f8f8; --fg-muted: #8a8f98; --fg-subtle: #62666d; --fg-faint: #4a4e55;
+    --accent: #5e6ad2; --accent-soft: #2a2f5c; --accent-text: #b4baf6; --warn: #f2c94c;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+  body {
+    background: var(--bg);
+    background-image:
+      linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+    background-size: 32px 32px;
+    font-family: Inter, sans-serif;
+    color: var(--fg);
+    letter-spacing: -0.011em;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+  }
+
+  .intro { position: absolute; left: 80px; top: 50%; transform: translateY(-50%); width: 440px; }
+  .intro img { width: 76px; height: 76px; display: block; margin-bottom: 28px; }
+  .intro h1 { font-size: 64px; font-weight: 700; letter-spacing: -0.035em; line-height: 1; }
+  .intro p { margin-top: 20px; font-size: 21px; line-height: 1.5; color: var(--fg-muted); }
+  .pills { display: flex; gap: 10px; margin-top: 30px; }
+  .pill { height: 38px; padding: 0 16px; border-radius: 7px; display: inline-flex; align-items: center;
+          font-size: 15px; font-weight: 500; border: 1px solid var(--line-strong); color: var(--fg); }
+  .pill.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  .window {
+    position: absolute; left: 596px; top: 84px; width: 624px; height: 580px;
+    background: var(--bg); border: 1px solid var(--line-strong); border-radius: 12px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.6); overflow: hidden; font-size: 13px;
+  }
+  .window::after { /* fade the bottom so the cut-off reads as intentional */
+    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 160px;
+    background: linear-gradient(to bottom, transparent, var(--bg) 85%);
+  }
+  .head { display: flex; align-items: center; gap: 8px; height: 46px; padding: 0 18px; border-bottom: 1px solid var(--line); }
+  .head b { font-weight: 600; font-size: 14px; }
+  .head .count { color: var(--fg-subtle); font-size: 12px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; padding: 10px 18px; border-bottom: 1px solid var(--line); }
+  .search { width: 230px; height: 30px; border: 1px solid var(--line-strong); background: var(--bg-soft); border-radius: 6px;
+            display: flex; align-items: center; gap: 8px; padding: 0 10px; color: var(--fg-faint); }
+  .seg { display: flex; gap: 2px; border: 1px solid var(--line); background: var(--bg-soft); border-radius: 6px; padding: 2px; }
+  .seg span { height: 24px; padding: 0 9px; border-radius: 4px; display: flex; align-items: center; gap: 6px;
+              font-size: 12px; font-weight: 500; color: var(--fg-muted); }
+  .seg span.on { background: var(--bg-active); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line-strong); }
+  .count-pill { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: inline-flex; align-items: center;
+                justify-content: center; font-size: 11px; font-weight: 500; font-style: normal; background: var(--bg-active); color: var(--fg-muted); }
+  .on .count-pill { background: var(--accent-soft); color: var(--accent-text); }
+  .filter { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--fg-muted); font-weight: 500; font-size: 12px; }
+
+  .list { padding: 4px 8px; }
+  .group { padding: 10px 12px 4px; font-size: 11px; font-weight: 500; color: var(--fg-subtle); }
+  .row { display: flex; gap: 11px; height: 58px; padding: 10px 12px 0 20px; border-radius: 6px; position: relative; }
+  .row.hover { background: var(--bg-hover); }
+  .row.unread::before { content: ''; position: absolute; left: 7px; top: 16px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .avatar { width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+            font-size: 13px; font-weight: 600; }
+  .text { flex: 1; min-width: 0; }
+  .top { display: flex; align-items: center; gap: 8px; }
+  .who { font-weight: 500; color: var(--fg-muted); white-space: nowrap; }
+  .unread .who { font-weight: 600; color: var(--fg); }
+  .when { margin-left: auto; font-size: 11.5px; color: var(--fg-subtle); display: flex; align-items: center; gap: 8px; }
+  .unread .when { color: var(--fg-muted); }
+  .line { margin-top: 5px; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg-subtle); }
+  .line b { font-weight: 400; color: var(--fg-muted); }
+  .unread .line b { color: var(--fg); }
+  .actions { margin-left: auto; display: flex; gap: 2px; margin-top: -4px; }
+  .actions span { width: 24px; height: 24px; border-radius: 5px; display: flex; align-items: center; justify-content: center; color: var(--fg-muted); }
+  .actions span.hot { background: #26272b; color: var(--fg); }
+
+  .note {
+    position: absolute; left: 812px; top: 404px; width: 380px; padding: 14px 16px 14px;
+    background: var(--bg-panel); border: 1px solid var(--line-strong); border-radius: 12px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.65), 0 2px 0 rgba(255,255,255,.03) inset;
+  }
+  .note .app { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-subtle); }
+  .note .app img { width: 18px; height: 18px; }
+  .note .app b { font-weight: 500; color: var(--fg-muted); }
+  .note h3 { margin-top: 10px; font-size: 14px; font-weight: 600; }
+  .note .subject { margin-top: 3px; font-size: 13px; font-weight: 600; color: var(--fg); }
+  .note .preview { margin-top: 2px; font-size: 13px; line-height: 1.45; color: var(--fg-muted); }
+  .note .buttons { display: flex; gap: 6px; margin-top: 12px; }
+  .note .buttons span { flex: 1; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center;
+                        font-size: 12.5px; font-weight: 500; background: var(--bg-active); color: var(--fg); }
+  .note .buttons span.primary { background: var(--accent); color: #fff; }
+</style>
+</head>
+<body>
+  <div class="intro">
+    <img src="../../assets/icon.svg" alt="" />
+    <h1>Postie</h1>
+    <p>A mail client that waits in the tray and tells you the moment mail arrives.</p>
+    <div class="pills">
+      <span class="pill primary">Linux</span>
+      <span class="pill">Free for commercial use</span>
+    </div>
+  </div>
+
+  <div class="window">
+    <div class="head"><b>All inboxes</b><span class="count">3 unread</span></div>
+    <div class="toolbar">
+      <div class="search">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        Search mail
+      </div>
+      <div class="seg">
+        <span class="on">Primary <i class="count-pill">3</i></span>
+        <span>Other <i class="count-pill">12</i></span>
+      </div>
+      <div class="filter">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+        All mail
+      </div>
+    </div>
+    <div class="list" id="list"></div>
+  </div>
+
+  <div class="note">
+    <div class="app"><img src="../../assets/icon.svg" alt="" /><b>Postie</b> · now</div>
+    <h3>Maya Chen</h3>
+    <div class="subject">Design review moved to Thursday</div>
+    <div class="preview">The review is moving to Thursday at 14:00.</div>
+    <div class="buttons"><span class="primary">Open</span><span>Mark as read</span><span>Archive</span></div>
+  </div>
+
+<script>
+  // render-banner.sh asks for #2x: the whole page drawn at twice the size, for high-DPI screens.
+  if (location.hash === '#2x') document.documentElement.style.zoom = 2
+  const icon = {
+    clip: '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+    flag: '<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><path d="M4 22v-7"/>',
+    archive: '<rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/>',
+    trash: '<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+    mail: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>'
+  }
+  const svg = (name, size = 12, fill = 'none') =>
+    `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="${fill}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${icon[name]}</svg>`
+
+  // Tints as Postie derives them from a name: a muted background and a light letter.
+  const people = {
+    Maya: ['#3c5c55', '#d9eee8'], Tom: ['#5a4657', '#f0dcea'], Alex: ['#47466a', '#dddcf6'],
+    Priya: ['#5c4844', '#f2e0dc'], Ben: ['#3d5c4c', '#d8efe2'], Jordan: ['#5c5240', '#f1e8d6']
+  }
+  const groups = [
+    ['Today', [
+      { who: 'Maya Chen', p: 'Maya', when: '09:41', subject: 'Design review moved to Thursday', snippet: 'Hi Sam, the review is moving to Thursday at 14:00, same room.', unread: 1 },
+      { who: 'Tom Reyes', p: 'Tom', when: '09:12', subject: 'Re: Quarterly numbers', snippet: 'Thanks, these look right. One question on the March figure.', unread: 1, hover: 1 },
+      { who: 'Alex Morgan', p: 'Alex', when: '08:30', subject: 'Contract draft for review', snippet: 'Attached is the draft we discussed. Could you look over section 4?', unread: 1, clip: 1, flag: 1 },
+    ]],
+    ['Yesterday', [
+      { who: 'Priya Shah', p: 'Priya', when: 'Wed', subject: 'Trip photos', snippet: 'Uploaded the photos from the weekend, the lake ones came out well.' },
+      { who: 'Ben Okafor', p: 'Ben', when: 'Wed', subject: 'Lunch next week?', snippet: 'Are you around Tuesday or Wednesday? There’s a new ramen place.' },
+      { who: 'Jordan Lee', p: 'Jordan', when: 'Wed', subject: 'Offsite agenda', snippet: 'First pass at the agenda, shout if anything is missing.' },
+    ]]
+  ]
+  let html = ''
+  for (const [title, rows] of groups) {
+    html += `<div class="group">${title}</div>`
+    for (const r of rows) {
+      const [bg, fg] = people[r.p]
+      const right = r.hover
+        ? `<div class="actions"><span>${svg('archive', 13)}</span><span class="hot">${svg('trash', 13)}</span><span>${svg('mail', 13)}</span><span>${svg('flag', 13)}</span></div>`
+        : `<span class="when">${r.clip ? `<span style="color:var(--fg-subtle)">${svg('clip')}</span>` : ''}${r.flag ? `<span style="color:var(--warn)">${svg('flag', 12, 'currentColor')}</span>` : ''}${r.when}</span>`
+      html += `<div class="row${r.unread ? ' unread' : ''}${r.hover ? ' hover' : ''}">
+        <div class="avatar" style="background:${bg};color:${fg}">${r.who[0]}</div>
+        <div class="text">
+          <div class="top"><span class="who">${r.who}</span>${right}</div>
+          <div class="line"><b>${r.subject}</b>&nbsp; ${r.snippet}</div>
+        </div>
+      </div>`
+    }
+  }
+  document.getElementById('list').innerHTML = html
+</script>
+</body>
+</html>
