@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS folders(
     last_uid INTEGER NOT NULL DEFAULT 0,
     synced INTEGER NOT NULL DEFAULT 0,
     server_count INTEGER NOT NULL DEFAULT 0,
+    fetch_older INTEGER NOT NULL DEFAULT 0,
     UNIQUE(account, path)
 );
 CREATE TABLE IF NOT EXISTS messages(
@@ -118,6 +119,7 @@ fn prepare(conn: Connection) -> Result<Connection> {
     add_column(&conn, "messages", "category", "INTEGER NOT NULL DEFAULT 0")?;
     add_column(&conn, "contacts", "sent", "INTEGER NOT NULL DEFAULT 0")?;
     add_column(&conn, "folders", "server_count", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column(&conn, "folders", "fetch_older", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(conn)
 }
 
@@ -244,9 +246,24 @@ pub struct Folder {
     pub total: i64,
     /// How many messages the server had at the last sync, to tell how much is still to download.
     pub server_count: i64,
+    /// Older messages asked for and not downloaded yet: a count, [`ALL_OLDER`], or 0.
+    pub fetch_older: i64,
 }
 
 impl Folder {
+    /// Messages on the server that aren't on this computer.
+    pub fn on_server_only(&self) -> i64 {
+        (self.server_count - self.total).max(0)
+    }
+
+    /// How many of those are on their way, having been asked for.
+    pub fn downloading(&self) -> i64 {
+        match self.fetch_older {
+            ALL_OLDER => self.on_server_only(),
+            wanted => wanted.min(self.on_server_only()),
+        }
+    }
+
     /// How deep the folder sits under its parents, for indenting in the sidebar.
     pub fn depth(&self) -> usize {
         match &self.delimiter {
@@ -262,7 +279,7 @@ pub fn folders(conn: &Connection) -> Result<Vec<Folder>> {
                 (SELECT COUNT(*) FROM messages m WHERE m.folder = f.id AND m.hidden = 0 AND m.seen = 0),
                 (SELECT COUNT(*) FROM messages m WHERE m.folder = f.id AND m.hidden = 0),
                 (SELECT COUNT(*) FROM messages m WHERE m.folder = f.id AND m.hidden = 0 AND m.seen = 0 AND m.category = 0),
-                f.server_count
+                f.server_count, f.fetch_older
          FROM folders f",
     )?;
     let mut folders: Vec<Folder> = stmt
@@ -278,6 +295,7 @@ pub fn folders(conn: &Connection) -> Result<Vec<Folder>> {
                 total: row.get(7)?,
                 unread_primary: row.get(8)?,
                 server_count: row.get(9)?,
+                fetch_older: row.get(10)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -360,19 +378,47 @@ pub fn set_server_count(conn: &Connection, folder: i64, count: u32) -> Result<()
     Ok(())
 }
 
-/// Synced folders of an account that the server has more of than the store, most important first.
-pub fn incomplete_folders(conn: &Connection, account: &str) -> Result<Vec<(i64, String, Role)>> {
-    let mut stmt = conn.prepare(
-        "SELECT f.id, f.path, f.role FROM folders f
-         WHERE f.account = ?1 AND f.synced = 1
-           AND f.server_count > (SELECT COUNT(*) FROM messages m WHERE m.folder = f.id)",
+/// `fetch_older` meaning every older message the server has.
+pub const ALL_OLDER: i64 = -1;
+
+/// Asks for `count` more older messages of a folder, or all of them with [`ALL_OLDER`].
+pub fn request_older(conn: &Connection, folder: i64, count: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE folders SET fetch_older = CASE
+             WHEN ?2 = -1 OR fetch_older = -1 THEN -1
+             ELSE fetch_older + ?2 END
+         WHERE id = ?1",
+        params![folder, count],
     )?;
-    let mut folders: Vec<(i64, String, Role)> = stmt
-        .query_map([account], |row| Ok((row.get(0)?, row.get(1)?, Role::parse(&row.get::<_, String>(2)?))))?
+    Ok(())
+}
+
+/// Folders of an account with older messages asked for, most important first, with how many.
+pub fn folders_wanting_older(conn: &Connection, account: &str) -> Result<Vec<(i64, String, Role, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path, role, fetch_older FROM folders WHERE account = ?1 AND synced = 1 AND fetch_older != 0",
+    )?;
+    let mut folders: Vec<(i64, String, Role, i64)> = stmt
+        .query_map([account], |row| {
+            Ok((row.get(0)?, row.get(1)?, Role::parse(&row.get::<_, String>(2)?), row.get(3)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
-    folders.retain(|(_, _, role)| role.synced());
-    folders.sort_by_key(|(_, _, role)| role.rank());
+    folders.retain(|(_, _, role, _)| role.synced());
+    folders.sort_by_key(|(_, _, role, _)| role.rank());
     Ok(folders)
+}
+
+/// Counts off older messages that have arrived; `finished` when the server has no more.
+pub fn fetched_older(conn: &Connection, folder: i64, count: usize, finished: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE folders SET fetch_older = CASE
+             WHEN ?3 THEN 0
+             WHEN fetch_older = -1 THEN -1
+             ELSE MAX(fetch_older - ?2, 0) END
+         WHERE id = ?1",
+        params![folder, count as i64, finished],
+    )?;
+    Ok(())
 }
 
 pub fn clear_folder(conn: &Connection, folder: i64) -> Result<()> {
@@ -1120,19 +1166,29 @@ mod tests {
     }
 
     #[test]
-    fn folders_with_more_on_the_server_are_incomplete() {
-        let mut conn = prepare(Connection::open_in_memory().unwrap()).unwrap();
+    fn older_mail_downloads_only_when_asked_for() {
+        let conn = prepare(Connection::open_in_memory().unwrap()).unwrap();
         let inbox = upsert_folder(&conn, "a", "INBOX", "Inbox", Role::Inbox, None).unwrap();
         let sent = upsert_folder(&conn, "a", "Sent", "Sent", Role::Sent, None).unwrap();
         set_folder_state(&conn, inbox, 1, 5).unwrap();
         set_folder_state(&conn, sent, 1, 5).unwrap();
-        let tx = conn.transaction().unwrap();
-        message(&tx, inbox, 5, "New", 1);
-        message(&tx, sent, 5, "Sent", 1);
-        tx.commit().unwrap();
-        set_server_count(&conn, inbox, 5).unwrap();
-        set_server_count(&conn, sent, 1).unwrap();
-        let incomplete: Vec<i64> = incomplete_folders(&conn, "a").unwrap().into_iter().map(|(id, _, _)| id).collect();
-        assert_eq!(incomplete, [inbox]);
+        set_server_count(&conn, inbox, 900).unwrap();
+        assert!(folders_wanting_older(&conn, "a").unwrap().is_empty(), "nothing until asked");
+
+        request_older(&conn, inbox, 500).unwrap();
+        request_older(&conn, inbox, 500).unwrap();
+        request_older(&conn, sent, ALL_OLDER).unwrap();
+        let wanted: Vec<(i64, i64)> =
+            folders_wanting_older(&conn, "a").unwrap().into_iter().map(|(id, _, _, n)| (id, n)).collect();
+        assert_eq!(wanted, [(inbox, 1000), (sent, ALL_OLDER)], "inbox first, requests add up");
+
+        fetched_older(&conn, inbox, 300, false).unwrap();
+        fetched_older(&conn, sent, 300, false).unwrap();
+        let inbox_folder = folders(&conn).unwrap().into_iter().find(|f| f.id == inbox).unwrap();
+        assert_eq!(inbox_folder.fetch_older, 700);
+        assert_eq!(inbox_folder.downloading(), 700);
+        fetched_older(&conn, sent, 1, true).unwrap();
+        let wanted: Vec<i64> = folders_wanting_older(&conn, "a").unwrap().into_iter().map(|(id, ..)| id).collect();
+        assert_eq!(wanted, [inbox], "all of Sent is done once the server runs out");
     }
 }

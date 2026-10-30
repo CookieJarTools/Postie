@@ -44,7 +44,7 @@ impl Hub {
     fn reload(&self) {
         let settings = Settings::load();
         // Workers read these when they start, so a change to any of them restarts every worker.
-        let sync_settings = |s: &Settings| (s.download_all, s.initial_messages, s.sync_minutes);
+        let sync_settings = |s: &Settings| (s.initial_messages, s.sync_minutes);
         let resync = sync_settings(&self.settings.lock().unwrap()) != sync_settings(&settings);
         let mut workers = self.workers.lock().unwrap();
         let stale: Vec<String> = workers

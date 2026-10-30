@@ -82,14 +82,13 @@ pub fn spawn(account: Account, settings: &Settings, events: UnboundedSender<Even
     let (commands, receiver) = unbounded_channel();
     let sync_every = Duration::from_secs(u64::from(settings.sync_minutes.max(1)) * 60);
     let initial = settings.initial_messages.max(50);
-    let download_all = settings.download_all;
     let worker_account = account.clone();
     let thread = std::thread::Builder::new()
         .name(format!("sync {}", account.email))
         .spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
             let local = tokio::task::LocalSet::new();
-            local.block_on(&runtime, run(worker_account, sync_every, initial, download_all, events, receiver));
+            local.block_on(&runtime, run(worker_account, sync_every, initial, events, receiver));
         })
         .expect("spawn sync thread");
     Handle { account, commands, thread: Some(thread) }
@@ -99,7 +98,6 @@ async fn run(
     account: Account,
     sync_every: Duration,
     initial: u32,
-    download_all: bool,
     events: UnboundedSender<Event>,
     mut commands: UnboundedReceiver<Command>,
 ) {
@@ -114,7 +112,6 @@ async fn run(
         account,
         sync_every,
         initial,
-        download_all,
         backlog: HashMap::new(),
         db,
         events,
@@ -157,9 +154,7 @@ struct Worker {
     account: Account,
     sync_every: Duration,
     initial: u32,
-    /// Keep every message, not just the newest `initial` of each folder.
-    download_all: bool,
-    /// Per folder, the UIDs older than anything in the store, still to be fetched.
+    /// Per folder, the UIDs older than anything in the store, still to be fetched when asked for.
     backlog: HashMap<i64, Vec<u32>>,
     db: Connection,
     events: UnboundedSender<Event>,
@@ -466,14 +461,12 @@ impl Worker {
         Ok(highest)
     }
 
-    /// Fetches the next batch of messages older than any in the store, when all mail is kept: the
-    /// most important folder first, newest of the old first, headers only (bodies follow like any
-    /// other). True when there's more to fetch.
+    /// Fetches the next batch of older messages someone asked for with Download more or Download
+    /// all: the most important folder first, newest of the old first, headers only (bodies follow
+    /// like any other). True when there's more to fetch.
     async fn backfill(&mut self, session: &mut Imap) -> Result<bool> {
-        if !self.download_all {
-            return Ok(false);
-        }
-        let Some((folder, path, role)) = store::incomplete_folders(&self.db, &self.account.id)?.into_iter().next()
+        let Some((folder, path, role, wanted)) =
+            store::folders_wanting_older(&self.db, &self.account.id)?.into_iter().next()
         else {
             return Ok(false);
         };
@@ -492,13 +485,18 @@ impl Worker {
             older.sort_unstable();
             self.backlog.insert(folder, older);
         }
+        let take = if wanted == store::ALL_OLDER { BACKFILL_BATCH } else { (wanted as usize).min(BACKFILL_BATCH) };
         let backlog = self.backlog.get_mut(&folder).expect("just filled");
-        let mut batch = backlog.split_off(backlog.len().saturating_sub(BACKFILL_BATCH));
+        let mut batch = backlog.split_off(backlog.len().saturating_sub(take));
+        let finished = backlog.is_empty();
         if batch.is_empty() {
-            // The server's count includes something the store won't hold; call the folder done.
+            // Nothing older on the server, though its count said so: something the store won't
+            // hold. Match the count, so the folder stops offering more.
             let held: i64 =
                 self.db.query_row("SELECT COUNT(*) FROM messages WHERE folder = ?1", [folder], |row| row.get(0))?;
             store::set_server_count(&self.db, folder, held as u32)?;
+            store::fetched_older(&self.db, folder, 0, true)?;
+            self.changed();
             return Ok(true);
         }
         batch.reverse();
@@ -512,6 +510,7 @@ impl Worker {
             }
             self.save_fetches(folder, role, &fetches, true, None)?;
         }
+        store::fetched_older(&self.db, folder, batch.len(), finished)?;
         self.changed();
         Ok(true)
     }

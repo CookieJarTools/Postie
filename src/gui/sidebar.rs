@@ -276,7 +276,7 @@ fn status_line(app: &App, ui: &mut Ui, out: &mut Vec<Action>) {
             let left = app.still_downloading();
             widgets::label(
                 ui,
-                format!("Downloading older mail · {} to go", thousands(left)),
+                format!("Downloading older mail · {} to go", super::thousands(left)),
                 theme::regular(12.0),
                 FG_MUTED,
             )
@@ -315,26 +315,13 @@ impl StatusLabel for crate::store::Status {
     }
 }
 
-/// 12400 as "12,400".
-fn thousands(n: i64) -> String {
-    let digits = n.abs().to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    if n < 0 { format!("-{out}") } else { out }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn groups_thousands() {
-        assert_eq!(super::thousands(7), "7");
-        assert_eq!(super::thousands(1000), "1,000");
-        assert_eq!(super::thousands(12400), "12,400");
-        assert_eq!(super::thousands(1234567), "1,234,567");
+        assert_eq!(crate::gui::thousands(7), "7");
+        assert_eq!(crate::gui::thousands(1000), "1,000");
+        assert_eq!(crate::gui::thousands(12400), "12,400");
+        assert_eq!(crate::gui::thousands(1234567), "1,234,567");
     }
 }

@@ -141,6 +141,8 @@ fn messages(app: &App, ui: &mut Ui, out: &mut Vec<Action>, view: &View) {
     if app.messages.is_empty() {
         ui.add_space(80.0);
         empty(app, ui, view);
+        ui.add_space(20.0);
+        older_on_server(app, ui, out);
         return;
     }
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -162,12 +164,72 @@ fn messages(app: &App, ui: &mut Ui, out: &mut Vec<Action>, view: &View) {
         if app.messages.len() as i64 >= app.limit {
             ui.add_space(10.0);
             ui.vertical_centered(|ui| {
-                if widgets::button(ui, "Load older messages", Kind::Ghost).clicked() {
+                if widgets::button(ui, "Show older messages", Kind::Ghost).clicked() {
                     out.push(Action::LoadMore);
                 }
             });
+        } else {
+            ui.add_space(16.0);
+            older_on_server(app, ui, out);
         }
         ui.add_space(16.0);
+    });
+}
+
+/// The end of what's on this computer: how much older mail the server still has, and buttons to
+/// fetch some or all of it. While searching it says the search couldn't look there.
+fn older_on_server(app: &App, ui: &mut Ui, out: &mut Vec<Action>) {
+    let scope = app.download_scope();
+    let remaining: i64 = scope.iter().map(|folder| folder.on_server_only()).sum();
+    let downloading: i64 = scope.iter().map(|folder| folder.downloading()).sum();
+    if remaining == 0 {
+        return;
+    }
+    ui.vertical_centered(|ui| {
+        ui.set_max_width(ui.available_width() - 40.0);
+        if downloading > 0 {
+            ui.horizontal(|ui| {
+                ui.add_space((ui.available_width() - 250.0).max(0.0) / 2.0);
+                widgets::spinner(ui, 12.0);
+                let text = format!("Downloading {} older emails…", super::thousands(downloading));
+                widgets::label(ui, text, theme::regular(12.5), FG_MUTED);
+            });
+            return;
+        }
+        let many = super::thousands(remaining);
+        let text = if app.search.trim().is_empty() {
+            format!("{many} older emails are still on the server.")
+        } else {
+            format!("This search only looked at emails on this computer. {many} older ones are still on the server.")
+        };
+        ui.add(egui::Label::new(egui::RichText::new(text).font(theme::regular(12.5)).color(FG_SUBTLE)).wrap());
+        ui.add_space(8.0);
+        let several = scope.iter().filter(|folder| folder.on_server_only() > 0).count() > 1;
+        // With a batch or less to go, "more" and "all" would be the same button.
+        if !several && remaining <= super::OLDER_BATCH {
+            let all = format!("Download all {many}");
+            let width = ui.painter().layout_no_wrap(all.clone(), theme::medium(13.0), FG).size().x + 24.0;
+            ui.allocate_ui_with_layout(vec2(width, 28.0), Layout::left_to_right(Align::Center), |ui| {
+                if widgets::button(ui, &all, Kind::Secondary).clicked() {
+                    out.push(Action::DownloadOlder { all: true });
+                }
+            });
+            return;
+        }
+        let more = if several {
+            format!("Download {} more from each", super::OLDER_BATCH)
+        } else {
+            format!("Download {} more", super::OLDER_BATCH)
+        };
+        let width = ui.painter().layout_no_wrap(more.clone(), theme::medium(13.0), FG).size().x + 140.0;
+        ui.allocate_ui_with_layout(vec2(width, 28.0), Layout::left_to_right(Align::Center), |ui| {
+            if widgets::button(ui, &more, Kind::Secondary).clicked() {
+                out.push(Action::DownloadOlder { all: false });
+            }
+            if widgets::button(ui, "Download all", Kind::Ghost).clicked() {
+                out.push(Action::DownloadOlder { all: true });
+            }
+        });
     });
 }
 

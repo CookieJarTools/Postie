@@ -162,22 +162,13 @@ fn page(app: &mut App, ui: &mut Ui, out: &mut Vec<Action>) {
             &[(2, "2 min"), (5, "5 min"), (15, "15 min"), (30, "30 min")],
         );
         divider(ui);
-        changed |= toggle_row(
+        changed |= choice_row(
             ui,
-            "Keep all mail on this computer",
-            "Postie downloads your newest mail first, then the rest in the background, so search finds old emails too. Turn it off to keep only the newest messages of each folder.",
-            &mut app.settings.download_all,
+            "First download",
+            "How many of the newest messages of each folder a new account starts with. Older ones download when you ask, at the bottom of a list.",
+            &mut app.settings.initial_messages,
+            &[(200, "200"), (400, "400"), (1000, "1,000"), (2500, "2,500")],
         );
-        if !app.settings.download_all {
-            divider(ui);
-            changed |= choice_row(
-                ui,
-                "Messages per folder",
-                "How many of the newest messages of each folder to keep.",
-                &mut app.settings.initial_messages,
-                &[(200, "200"), (400, "400"), (1000, "1,000"), (2500, "2,500")],
-            );
-        }
     });
     ui.add_space(28.0);
 

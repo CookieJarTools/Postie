@@ -34,6 +34,8 @@ use theme::*;
 use widgets::Kind;
 
 const PAGE: i64 = 400;
+/// How many older messages Download more fetches for each folder.
+pub const OLDER_BATCH: i64 = 500;
 
 pub fn run(message: Option<i64>) -> Result<()> {
     let icon = egui::IconData { rgba: crate::icon::rgba(256, false), width: 256, height: 256 };
@@ -120,6 +122,10 @@ pub enum Action {
     Previous,
     StartDaemon,
     LoadMore,
+    /// Fetch older mail from the server for the folders in view: 500 more each, or all of it.
+    DownloadOlder {
+        all: bool,
+    },
     ToggleAccount(String),
     /// An account dragged from its place to before the one at `.1` (or to the end).
     MoveAccount(usize, usize),
@@ -382,14 +388,24 @@ impl App {
 
     /// Messages the servers have that aren't downloaded yet, while all mail is being kept.
     pub fn still_downloading(&self) -> i64 {
-        if !self.settings.download_all {
-            return 0;
-        }
+        self.folders.iter().filter(|folder| folder.role.synced()).map(Folder::downloading).sum()
+    }
+
+    /// The folders the list is showing, or a search is looking through: where Download more and
+    /// Download all fetch older mail for.
+    pub fn download_scope(&self) -> Vec<&Folder> {
+        let Nav::Mailbox(view) = &self.nav else { return Vec::new() };
+        let searching_everywhere = self.search_everywhere && !self.search.trim().is_empty();
         self.folders
             .iter()
             .filter(|folder| folder.role.synced())
-            .map(|folder| (folder.server_count - folder.total).max(0))
-            .sum()
+            .filter(|folder| match view {
+                _ if searching_everywhere => !matches!(folder.role, Role::Trash | Role::Junk),
+                View::Folder(id) => folder.id == *id,
+                View::Unified(role) => folder.role == *role,
+                View::Flagged => false,
+            })
+            .collect()
     }
 
     /// Unread across inboxes: Primary only when inboxes are split, as the badge and tray count.
@@ -751,6 +767,20 @@ impl App {
                 Ok(()) => self.last_connect = ctx.input(|i| i.time) - 4.0,
                 Err(err) => self.toast(format!("{err:#}")),
             },
+            Action::DownloadOlder { all } => {
+                let folders: Vec<i64> =
+                    self.download_scope().iter().filter(|f| f.on_server_only() > 0).map(|f| f.id).collect();
+                let count = if all { store::ALL_OLDER } else { OLDER_BATCH };
+                for folder in &folders {
+                    if let Err(err) = store::request_older(&self.db, *folder, count) {
+                        self.toast(format!("Couldn't ask for older mail: {err:#}"));
+                        return;
+                    }
+                }
+                self.tell_daemon(Request::Wake);
+                self.toast(if all { "Downloading all older emails" } else { "Downloading older emails" });
+                self.dirty = true;
+            }
             Action::LoadMore => {
                 self.limit += PAGE;
                 self.dirty = true;
@@ -1297,6 +1327,19 @@ fn draft_from_raw(outgoing: &Outgoing) -> Draft {
 /// leaves shifts everything after it up by one.
 fn moved_index(from: usize, slot: usize) -> usize {
     if slot > from { slot - 1 } else { slot }
+}
+
+/// 12400 as "12,400".
+pub fn thousands(n: i64) -> String {
+    let digits = n.abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
 }
 
 pub fn sanitize(name: &str) -> String {

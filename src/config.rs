@@ -78,7 +78,8 @@ pub struct Settings {
     pub do_not_disturb: bool,
     pub launch_at_login: bool,
     pub sync_minutes: u32,
-    /// How many of the newest messages per folder the first sync downloads.
+    /// How many of the newest messages per folder the first sync downloads; older ones come when asked
+    /// for at the bottom of a list.
     pub initial_messages: u32,
     pub undo_send_seconds: u32,
     pub mark_read_on_open: bool,
@@ -90,9 +91,6 @@ pub struct Settings {
     pub monospace_bodies: bool,
     /// Senders whose mail opens in the original view, images and all.
     pub image_senders: Vec<String>,
-    /// Keep every message on this computer, so search finds old mail; otherwise only the newest
-    /// `initial_messages` of each folder.
-    pub download_all: bool,
 }
 
 impl Default for Settings {
@@ -111,7 +109,6 @@ impl Default for Settings {
             notify_other: false,
             monospace_bodies: false,
             image_senders: Vec::new(),
-            download_all: true,
         }
     }
 }
