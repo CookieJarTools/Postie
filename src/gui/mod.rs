@@ -68,6 +68,7 @@ pub enum Action {
     Navigate(Nav),
     Select(i64),
     SetCategoryTab(Category),
+    SearchEverywhere(bool),
     /// Moves a message, and its sender from now on, to Primary or Other.
     SetCategory(i64, Category),
     SetFilter(Filter),
@@ -176,6 +177,8 @@ pub struct App {
     pub category: Category,
     pub search: String,
     searched: String,
+    /// A search looks in every folder rather than only the one shown.
+    pub search_everywhere: bool,
     pub messages: Vec<Summary>,
     pub limit: i64,
     pub selected: Option<i64>,
@@ -229,6 +232,7 @@ impl App {
             category: Category::Primary,
             search: String::new(),
             searched: String::new(),
+            search_everywhere: true,
             messages: Vec::new(),
             limit: PAGE,
             selected: None,
@@ -293,7 +297,9 @@ impl App {
         }
         let category = self.inbox_split().then_some(self.category);
         self.messages = match &self.nav {
-            Nav::Mailbox(view) => store::list(&self.db, view, category, self.filter, &self.search, self.limit)?,
+            Nav::Mailbox(view) => {
+                store::list(&self.db, view, category, self.filter, &self.search, self.search_everywhere, self.limit)?
+            }
             Nav::Drafts | Nav::Outbox => Vec::new(),
         };
         self.searched = self.search.clone();
@@ -372,6 +378,18 @@ impl App {
             Nav::Drafts => "Drafts".into(),
             Nav::Outbox => "Outbox".into(),
         }
+    }
+
+    /// Messages the servers have that aren't downloaded yet, while all mail is being kept.
+    pub fn still_downloading(&self) -> i64 {
+        if !self.settings.download_all {
+            return 0;
+        }
+        self.folders
+            .iter()
+            .filter(|folder| folder.role.synced())
+            .map(|folder| (folder.server_count - folder.total).max(0))
+            .sum()
     }
 
     /// Unread across inboxes: Primary only when inboxes are split, as the badge and tray count.
@@ -530,6 +548,10 @@ impl App {
                 self.dirty = true;
             }
             Action::Select(id) => self.select(id),
+            Action::SearchEverywhere(everywhere) => {
+                self.search_everywhere = everywhere;
+                self.dirty = true;
+            }
             Action::SetCategoryTab(category) => {
                 self.category = category;
                 self.selected = None;

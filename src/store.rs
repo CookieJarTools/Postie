@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS folders(
     uidvalidity INTEGER NOT NULL DEFAULT 0,
     last_uid INTEGER NOT NULL DEFAULT 0,
     synced INTEGER NOT NULL DEFAULT 0,
+    server_count INTEGER NOT NULL DEFAULT 0,
     UNIQUE(account, path)
 );
 CREATE TABLE IF NOT EXISTS messages(
@@ -107,12 +108,16 @@ CREATE TABLE IF NOT EXISTS status(
 
 pub fn open() -> Result<Connection> {
     std::fs::create_dir_all(paths::data_dir())?;
-    let conn = Connection::open(paths::database())?;
+    prepare(Connection::open(paths::database())?)
+}
+
+fn prepare(conn: Connection) -> Result<Connection> {
     conn.busy_timeout(std::time::Duration::from_secs(10))?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;")?;
     conn.execute_batch(SCHEMA)?;
     add_column(&conn, "messages", "category", "INTEGER NOT NULL DEFAULT 0")?;
     add_column(&conn, "contacts", "sent", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column(&conn, "folders", "server_count", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(conn)
 }
 
@@ -237,6 +242,8 @@ pub struct Folder {
     /// Unread in Primary: what an inbox's badge shows when inboxes are split.
     pub unread_primary: i64,
     pub total: i64,
+    /// How many messages the server had at the last sync, to tell how much is still to download.
+    pub server_count: i64,
 }
 
 impl Folder {
@@ -254,7 +261,8 @@ pub fn folders(conn: &Connection) -> Result<Vec<Folder>> {
         "SELECT f.id, f.account, f.path, f.name, f.role, f.delimiter,
                 (SELECT COUNT(*) FROM messages m WHERE m.folder = f.id AND m.hidden = 0 AND m.seen = 0),
                 (SELECT COUNT(*) FROM messages m WHERE m.folder = f.id AND m.hidden = 0),
-                (SELECT COUNT(*) FROM messages m WHERE m.folder = f.id AND m.hidden = 0 AND m.seen = 0 AND m.category = 0)
+                (SELECT COUNT(*) FROM messages m WHERE m.folder = f.id AND m.hidden = 0 AND m.seen = 0 AND m.category = 0),
+                f.server_count
          FROM folders f",
     )?;
     let mut folders: Vec<Folder> = stmt
@@ -269,6 +277,7 @@ pub fn folders(conn: &Connection) -> Result<Vec<Folder>> {
                 unread: row.get(6)?,
                 total: row.get(7)?,
                 unread_primary: row.get(8)?,
+                server_count: row.get(9)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -344,6 +353,26 @@ pub fn set_folder_state(conn: &Connection, folder: i64, uidvalidity: u32, last_u
         params![folder, uidvalidity as i64, last_uid as i64],
     )?;
     Ok(())
+}
+
+pub fn set_server_count(conn: &Connection, folder: i64, count: u32) -> Result<()> {
+    conn.execute("UPDATE folders SET server_count = ?2 WHERE id = ?1", params![folder, count as i64])?;
+    Ok(())
+}
+
+/// Synced folders of an account that the server has more of than the store, most important first.
+pub fn incomplete_folders(conn: &Connection, account: &str) -> Result<Vec<(i64, String, Role)>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.path, f.role FROM folders f
+         WHERE f.account = ?1 AND f.synced = 1
+           AND f.server_count > (SELECT COUNT(*) FROM messages m WHERE m.folder = f.id)",
+    )?;
+    let mut folders: Vec<(i64, String, Role)> = stmt
+        .query_map([account], |row| Ok((row.get(0)?, row.get(1)?, Role::parse(&row.get::<_, String>(2)?))))?
+        .collect::<rusqlite::Result<_>>()?;
+    folders.retain(|(_, _, role)| role.synced());
+    folders.sort_by_key(|(_, _, role)| role.rank());
+    Ok(folders)
 }
 
 pub fn clear_folder(conn: &Connection, folder: i64) -> Result<()> {
@@ -640,12 +669,16 @@ pub fn list(
     category: Option<Category>,
     filter: Filter,
     search: &str,
+    everywhere: bool,
     limit: i64,
 ) -> Result<Vec<Summary>> {
     let mut sql =
         format!("SELECT {SUMMARY_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder WHERE m.hidden = 0");
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    // A search everywhere looks past the folder being shown, to every folder but Trash and Junk.
+    let everywhere = everywhere && !search.trim().is_empty();
     match view {
+        _ if everywhere => sql.push_str(" AND f.role NOT IN ('trash', 'junk')"),
         View::Folder(id) => {
             sql.push_str(" AND m.folder = ?");
             args.push(Box::new(*id));
@@ -1043,4 +1076,63 @@ pub fn forget_account(conn: &Connection, account: &str) -> Result<()> {
     conn.execute("DELETE FROM outbox WHERE account = ?1", [account])?;
     conn.execute("DELETE FROM status WHERE account = ?1", [account])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(tx: &Transaction, folder: i64, uid: u32, subject: &str, date: i64) {
+        let parsed = Parsed {
+            subject: subject.into(),
+            from: ("Ann".into(), "ann@example.com".into()),
+            date,
+            search_text: format!("{subject} body"),
+            ..Default::default()
+        };
+        upsert_message(tx, "a", folder, uid, Flags::default(), 10, &parsed, None, Category::Primary).unwrap();
+    }
+
+    #[test]
+    fn search_everywhere_finds_old_mail_outside_the_folder_shown() {
+        let mut conn = prepare(Connection::open_in_memory().unwrap()).unwrap();
+        let inbox = upsert_folder(&conn, "a", "INBOX", "Inbox", Role::Inbox, None).unwrap();
+        let archive = upsert_folder(&conn, "a", "Archive", "Archive", Role::Archive, None).unwrap();
+        let trash = upsert_folder(&conn, "a", "Trash", "Trash", Role::Trash, None).unwrap();
+        let tx = conn.transaction().unwrap();
+        message(&tx, inbox, 1, "Lunch", 3_000);
+        message(&tx, archive, 1, "Invoice from 2019", 1_000);
+        message(&tx, trash, 1, "Invoice duplicate", 2_000);
+        tx.commit().unwrap();
+
+        let inboxes = View::Unified(Role::Inbox);
+        let found = |everywhere| -> Vec<String> {
+            list(&conn, &inboxes, None, Filter::All, "invoice", everywhere, 50)
+                .unwrap()
+                .into_iter()
+                .map(|summary| summary.subject)
+                .collect()
+        };
+        assert_eq!(found(true), ["Invoice from 2019"], "everywhere, but not Trash");
+        assert!(found(false).is_empty(), "this folder only");
+        let all = list(&conn, &inboxes, None, Filter::All, "", true, 50).unwrap();
+        assert_eq!(all.len(), 1, "without a search the view stays the inbox");
+    }
+
+    #[test]
+    fn folders_with_more_on_the_server_are_incomplete() {
+        let mut conn = prepare(Connection::open_in_memory().unwrap()).unwrap();
+        let inbox = upsert_folder(&conn, "a", "INBOX", "Inbox", Role::Inbox, None).unwrap();
+        let sent = upsert_folder(&conn, "a", "Sent", "Sent", Role::Sent, None).unwrap();
+        set_folder_state(&conn, inbox, 1, 5).unwrap();
+        set_folder_state(&conn, sent, 1, 5).unwrap();
+        let tx = conn.transaction().unwrap();
+        message(&tx, inbox, 5, "New", 1);
+        message(&tx, sent, 5, "Sent", 1);
+        tx.commit().unwrap();
+        set_server_count(&conn, inbox, 5).unwrap();
+        set_server_count(&conn, sent, 1).unwrap();
+        let incomplete: Vec<i64> = incomplete_folders(&conn, "a").unwrap().into_iter().map(|(id, _, _)| id).collect();
+        assert_eq!(incomplete, [inbox]);
+    }
 }

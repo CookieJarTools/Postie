@@ -90,6 +90,9 @@ pub struct Settings {
     pub monospace_bodies: bool,
     /// Senders whose mail opens in the original view, images and all.
     pub image_senders: Vec<String>,
+    /// Keep every message on this computer, so search finds old mail; otherwise only the newest
+    /// `initial_messages` of each folder.
+    pub download_all: bool,
 }
 
 impl Default for Settings {
@@ -108,6 +111,7 @@ impl Default for Settings {
             notify_other: false,
             monospace_bodies: false,
             image_senders: Vec::new(),
+            download_all: true,
         }
     }
 }

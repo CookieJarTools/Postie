@@ -73,7 +73,9 @@ After you send, an **Undo** button stays on screen for a few seconds in case you
 
 ### Finding things
 
-Search covers who sent an email, who it was to, its subject and its text. You can narrow it down with `from:ann`, `to:ben`, `subject:invoice`, `is:unread`, `is:flagged` or `has:attachment`, and the filter button shows only unread, flagged or messages with files.
+Postie keeps all of your mail on your computer, so search finds emails from years ago as quickly as today's. It covers who sent an email, who it was to, its subject and its text, in every folder except Trash and Junk; switch to **This folder** to look in just the one you're in. You can narrow it down with `from:ann`, `to:ben`, `subject:invoice`, `is:unread`, `is:flagged` or `has:attachment`, and the filter button shows only unread, flagged or messages with files.
+
+When you first add an account, your newest mail appears straight away and the rest downloads in the background; the sidebar shows how much is left. If you'd rather keep only recent mail, turn off **Keep all mail on this computer** in Settings.
 
 ## Getting started
 
@@ -156,7 +158,9 @@ At login the service runs as the `postie.service` systemd user service, which al
 
 <br />
 
-Each account keeps one IMAP connection for syncing and a second sitting in IDLE on the inbox, which is how new mail turns up within a second or two instead of on a timer. Other folders are checked every few minutes. The first sync takes the newest 400 messages of each folder, headers first so the list appears quickly, then the bodies in the background; **Load older messages** fetches more.
+Each account keeps one IMAP connection for syncing and a second sitting in IDLE on the inbox, which is how new mail turns up within a second or two instead of on a timer. Other folders are checked every few minutes. A new account's first sync takes the newest 400 messages of each folder, headers first so the list appears quickly. After that, each round of syncing also fetches a batch of older messages (inbox first, then the other folders) and a batch of message bodies, newest first, until everything is on your computer. New mail and your own changes are dealt with first in every round, so they never wait behind the download. Messages over 4 MB download when you open them.
+
+Mail that was imported or copied into an account (when moving from another provider, for example) is dated by the email's own date rather than the day it was imported.
 
 Everything you do in the window (reading, flagging, archiving, sending) is applied to the local copy at once and queued. The service replays the queue on the server. Each change waits for the server to confirm it, and after a quiet spell the connection is checked before it's trusted, so a change made just as a connection dropped is tried again rather than lost.
 

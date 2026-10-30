@@ -271,6 +271,18 @@ fn status_line(app: &App, ui: &mut Ui, out: &mut Vec<Action>) {
         } else if busy {
             widgets::spinner(ui, 12.0);
             widgets::label(ui, "Syncing…", theme::regular(12.0), FG_MUTED);
+        } else if app.still_downloading() > 0 {
+            widgets::spinner(ui, 12.0);
+            let left = app.still_downloading();
+            widgets::label(
+                ui,
+                format!("Downloading older mail · {} to go", thousands(left)),
+                theme::regular(12.0),
+                FG_MUTED,
+            )
+            .on_hover_text(
+                "Postie is fetching the rest of your mail so search can find it. New mail still comes straight in.",
+            );
         } else if let Some(at) = app.statuses.iter().map(|status| status.at).max() {
             dot(ui, SUCCESS);
             widgets::label(ui, format!("Up to date · {}", super::ago(at)), theme::regular(12.0), FG_SUBTLE);
@@ -300,5 +312,29 @@ impl StatusLabel for crate::store::Status {
             .account(&self.account)
             .map(|account| account.label().to_owned())
             .unwrap_or_else(|| self.account.clone())
+    }
+}
+
+/// 12400 as "12,400".
+fn thousands(n: i64) -> String {
+    let digits = n.abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn groups_thousands() {
+        assert_eq!(super::thousands(7), "7");
+        assert_eq!(super::thousands(1000), "1,000");
+        assert_eq!(super::thousands(12400), "12,400");
+        assert_eq!(super::thousands(1234567), "1,234,567");
     }
 }

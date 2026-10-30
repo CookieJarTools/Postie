@@ -59,7 +59,13 @@ fn header(app: &mut App, ui: &mut Ui, out: &mut Vec<Action>) {
     }
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        if app.inbox_split() && app.search.trim().is_empty() {
+        if !app.search.trim().is_empty() {
+            let mut everywhere = app.search_everywhere;
+            let scopes = [(true, "Everywhere", None), (false, "This folder", None)];
+            if widgets::segmented(ui, &mut everywhere, &scopes) {
+                out.push(Action::SearchEverywhere(everywhere));
+            }
+        } else if app.inbox_split() {
             let (primary, other) = split_unread(app);
             let mut category = app.category;
             let tabs = [(Category::Primary, "Primary", Some(primary)), (Category::Other, "Other", Some(other))];

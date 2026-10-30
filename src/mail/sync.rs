@@ -2,7 +2,7 @@
 //! sends what's due, syncs folders, and watches the inbox with IDLE so new mail shows up at once.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -23,6 +23,12 @@ use crate::store::{self, Category, Flags, Op, Role};
 /// Bodies up to this size download in the background; bigger ones wait until opened.
 const AUTO_BODY_BYTES: i64 = 4 * 1024 * 1024;
 const BODY_BATCH: i64 = 40;
+/// Older messages fetched per round when downloading all mail; small enough that new mail and your
+/// own changes never wait long behind it.
+const BACKFILL_BATCH: usize = 300;
+/// How far back a quick check (after new mail arrives) looks for changed flags and deleted mail; the
+/// full sync every few minutes covers the rest of the folder.
+const QUICK_FLAG_WINDOW: usize = 1000;
 const POLL_WITHOUT_IDLE: Duration = Duration::from_secs(120);
 /// Under the 29 minutes RFC 2177 allows, and short enough for home routers that forget quiet connections.
 const IDLE_RENEW: Duration = Duration::from_secs(9 * 60);
@@ -76,13 +82,14 @@ pub fn spawn(account: Account, settings: &Settings, events: UnboundedSender<Even
     let (commands, receiver) = unbounded_channel();
     let sync_every = Duration::from_secs(u64::from(settings.sync_minutes.max(1)) * 60);
     let initial = settings.initial_messages.max(50);
+    let download_all = settings.download_all;
     let worker_account = account.clone();
     let thread = std::thread::Builder::new()
         .name(format!("sync {}", account.email))
         .spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
             let local = tokio::task::LocalSet::new();
-            local.block_on(&runtime, run(worker_account, sync_every, initial, events, receiver));
+            local.block_on(&runtime, run(worker_account, sync_every, initial, download_all, events, receiver));
         })
         .expect("spawn sync thread");
     Handle { account, commands, thread: Some(thread) }
@@ -92,6 +99,7 @@ async fn run(
     account: Account,
     sync_every: Duration,
     initial: u32,
+    download_all: bool,
     events: UnboundedSender<Event>,
     mut commands: UnboundedReceiver<Command>,
 ) {
@@ -106,6 +114,8 @@ async fn run(
         account,
         sync_every,
         initial,
+        download_all,
+        backlog: HashMap::new(),
         db,
         events,
         wake: Rc::new(Notify::new()),
@@ -147,6 +157,10 @@ struct Worker {
     account: Account,
     sync_every: Duration,
     initial: u32,
+    /// Keep every message, not just the newest `initial` of each folder.
+    download_all: bool,
+    /// Per folder, the UIDs older than anything in the store, still to be fetched.
+    backlog: HashMap<i64, Vec<u32>>,
     db: Connection,
     events: UnboundedSender<Event>,
     wake: Rc<Notify>,
@@ -205,6 +219,7 @@ impl Worker {
         self.backoff = Duration::from_secs(10);
         self.retry_quietly = true;
         self.selected = None;
+        self.backlog.clear();
         let caps = session.capabilities().await?;
         self.caps = Caps { idle: caps.has_str("IDLE"), mv: caps.has_str("MOVE"), uidplus: caps.has_str("UIDPLUS") };
 
@@ -225,8 +240,9 @@ impl Worker {
                 self.sync_folders(&mut session, Some(Role::Inbox)).await?;
             }
             let more_bodies = self.fetch_bodies(&mut session).await?;
+            let more_older = self.backfill(&mut session).await?;
             self.status("idle", None);
-            if more_bodies {
+            if more_bodies || more_older {
                 continue;
             }
 
@@ -322,8 +338,9 @@ impl Worker {
             .collect();
         // Sent first: who you write to and what you sent decide what's Primary in the inbox.
         folders.sort_by_key(|(_, _, role)| *role != Role::Sent);
+        let full = only.is_none();
         for (id, path, role) in folders {
-            let new_mail = self.sync_folder(session, id, &path, role).await?;
+            let new_mail = self.sync_folder(session, id, &path, role, full).await?;
             if !new_mail.is_empty() {
                 let _ = self.events.send(Event::NewMail { account: self.account.id.clone(), items: new_mail });
             }
@@ -331,19 +348,28 @@ impl Worker {
         Ok(())
     }
 
-    async fn sync_folder(&mut self, session: &mut Imap, folder: i64, path: &str, role: Role) -> Result<Vec<NewMail>> {
+    async fn sync_folder(
+        &mut self,
+        session: &mut Imap,
+        folder: i64,
+        path: &str,
+        role: Role,
+        full: bool,
+    ) -> Result<Vec<NewMail>> {
         let mailbox = self.select(session, path).await?;
         let validity = mailbox.uid_validity.unwrap_or(0);
         let mut state = store::folder_state(&self.db, folder)?;
         if state.synced && state.uidvalidity != validity {
             store::clear_folder(&self.db, folder)?;
+            self.backlog.remove(&folder);
             state = store::folder_state(&self.db, folder)?;
             self.changed();
         }
         let first = !state.synced;
+        store::set_server_count(&self.db, folder, mailbox.exists)?;
 
         if !first {
-            self.sync_flags(session, folder, mailbox.exists).await?;
+            self.sync_flags(session, folder, mailbox.exists, full).await?;
         }
 
         let mut uids: Vec<u32> = if mailbox.exists == 0 {
@@ -376,44 +402,9 @@ impl Worker {
             if fetches.len() < chunk.len() {
                 confirm(session).await?;
             }
-            let tx = self.db.transaction()?;
-            for fetch in &fetches {
-                let Some(uid) = fetch.uid else { continue };
-                let Some(bytes) = (if first { fetch.header() } else { fetch.body() }) else { continue };
-                let received = fetch.internal_date().map(|date| date.timestamp());
-                let mut parsed = parse::parse(bytes, received.unwrap_or_else(store::now));
-                // Sorted by when it arrived, as Outlook does: a sender's clock can be wrong.
-                if let Some(received) = received {
-                    parsed.date = received;
-                }
-                let flags = flags_of(fetch);
-                let raw = (!first).then_some(bytes);
-                let size = fetch.size.unwrap_or(bytes.len() as u32);
-                let category = store::classify(&tx, &parsed, &self.account.email)?;
-                let (id, inserted) =
-                    store::upsert_message(&tx, &self.account.id, folder, uid, flags, size, &parsed, raw, category)?;
-                last_uid = last_uid.max(uid);
-                if !inserted {
-                    continue;
-                }
-                store::remember_contacts(&tx, std::slice::from_ref(&parsed.from), 1, false, parsed.date)?;
-                if role == Role::Sent {
-                    let recipients = [parsed.to.clone(), parsed.cc.clone()].concat();
-                    store::remember_contacts(&tx, &recipients, 2, true, parsed.date)?;
-                }
-                let moved_here = self.moved.remove(&parsed.message_id);
-                if !first && role == Role::Inbox && !flags.seen && !moved_here {
-                    let from = if parsed.from.0.is_empty() { parsed.from.1.clone() } else { parsed.from.0.clone() };
-                    new_mail.push(NewMail {
-                        id,
-                        from,
-                        subject: parsed.subject.clone(),
-                        snippet: parsed.snippet.clone(),
-                        category,
-                    });
-                }
-            }
-            tx.commit()?;
+            let announce = !first && role == Role::Inbox;
+            last_uid =
+                last_uid.max(self.save_fetches(folder, role, &fetches, first, announce.then_some(&mut new_mail))?);
             self.changed();
         }
         store::set_folder_state(&self.db, folder, validity, last_uid)?;
@@ -421,9 +412,117 @@ impl Worker {
         Ok(new_mail)
     }
 
+    /// Saves fetched messages, headers only or whole. With `announce`, unread mail new to the store
+    /// is collected there for a notification. Returns the highest UID saved.
+    fn save_fetches(
+        &mut self,
+        folder: i64,
+        role: Role,
+        fetches: &[Fetch],
+        headers_only: bool,
+        mut announce: Option<&mut Vec<NewMail>>,
+    ) -> Result<u32> {
+        let mut highest = 0;
+        let tx = self.db.transaction()?;
+        for fetch in fetches {
+            let Some(uid) = fetch.uid else { continue };
+            let Some(bytes) = (if headers_only { fetch.header() } else { fetch.body() }) else { continue };
+            let received = fetch.internal_date().map(|date| date.timestamp());
+            let mut parsed = parse::parse(bytes, received.unwrap_or_else(store::now));
+            if let Some(received) = received {
+                parsed.date = message_date(parsed.date, received);
+            }
+            let flags = flags_of(fetch);
+            let raw = (!headers_only).then_some(bytes);
+            let size = fetch.size.unwrap_or(bytes.len() as u32);
+            let category = store::classify(&tx, &parsed, &self.account.email)?;
+            let (id, inserted) =
+                store::upsert_message(&tx, &self.account.id, folder, uid, flags, size, &parsed, raw, category)?;
+            highest = highest.max(uid);
+            if !inserted {
+                continue;
+            }
+            store::remember_contacts(&tx, std::slice::from_ref(&parsed.from), 1, false, parsed.date)?;
+            if role == Role::Sent {
+                let recipients = [parsed.to.clone(), parsed.cc.clone()].concat();
+                store::remember_contacts(&tx, &recipients, 2, true, parsed.date)?;
+            }
+            let moved_here = self.moved.remove(&parsed.message_id);
+            if let Some(new_mail) = announce.as_deref_mut()
+                && !flags.seen
+                && !moved_here
+            {
+                let from = if parsed.from.0.is_empty() { parsed.from.1.clone() } else { parsed.from.0.clone() };
+                new_mail.push(NewMail {
+                    id,
+                    from,
+                    subject: parsed.subject.clone(),
+                    snippet: parsed.snippet.clone(),
+                    category,
+                });
+            }
+        }
+        tx.commit()?;
+        Ok(highest)
+    }
+
+    /// Fetches the next batch of messages older than any in the store, when all mail is kept: the
+    /// most important folder first, newest of the old first, headers only (bodies follow like any
+    /// other). True when there's more to fetch.
+    async fn backfill(&mut self, session: &mut Imap) -> Result<bool> {
+        if !self.download_all {
+            return Ok(false);
+        }
+        let Some((folder, path, role)) = store::incomplete_folders(&self.db, &self.account.id)?.into_iter().next()
+        else {
+            return Ok(false);
+        };
+        if !self.backlog.contains_key(&folder) {
+            self.ensure_selected(session, &path).await?;
+            let oldest = store::known_uids(&self.db, folder)?.into_iter().min();
+            let mut older: Vec<u32> = match oldest {
+                Some(oldest) if oldest > 1 => session
+                    .uid_search(format!("UID 1:{}", oldest - 1))
+                    .await?
+                    .into_iter()
+                    .filter(|uid| *uid < oldest)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            older.sort_unstable();
+            self.backlog.insert(folder, older);
+        }
+        let backlog = self.backlog.get_mut(&folder).expect("just filled");
+        let mut batch = backlog.split_off(backlog.len().saturating_sub(BACKFILL_BATCH));
+        if batch.is_empty() {
+            // The server's count includes something the store won't hold; call the folder done.
+            let held: i64 =
+                self.db.query_row("SELECT COUNT(*) FROM messages WHERE folder = ?1", [folder], |row| row.get(0))?;
+            store::set_server_count(&self.db, folder, held as u32)?;
+            return Ok(true);
+        }
+        batch.reverse();
+        self.ensure_selected(session, &path).await?;
+        for chunk in batch.chunks(100) {
+            let set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+            let query = "(UID FLAGS RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER])";
+            let fetches: Vec<Fetch> = session.uid_fetch(&set, query).await?.try_collect().await?;
+            if fetches.len() < chunk.len() {
+                confirm(session).await?;
+            }
+            self.save_fetches(folder, role, &fetches, true, None)?;
+        }
+        self.changed();
+        Ok(true)
+    }
+
     /// Picks up flags changed elsewhere and drops what was deleted elsewhere.
-    async fn sync_flags(&mut self, session: &mut Imap, folder: i64, exists: u32) -> Result<()> {
-        let known = store::known_uids(&self.db, folder)?;
+    async fn sync_flags(&mut self, session: &mut Imap, folder: i64, exists: u32, full: bool) -> Result<()> {
+        let mut known = store::known_uids(&self.db, folder)?;
+        if !full {
+            known.sort_unstable();
+            known = known.split_off(known.len().saturating_sub(QUICK_FLAG_WINDOW));
+        }
         let Some(lowest) = known.iter().min().copied() else { return Ok(()) };
         let mut present = HashSet::new();
         let mut changed = false;
@@ -701,6 +800,14 @@ async fn confirm(session: &mut Imap) -> Result<()> {
     Ok(())
 }
 
+/// When a message is shown as arriving. Usually when the server received it, as Outlook does, since
+/// a sender's clock can be wrong. But mail imported or copied into an account carries the date of
+/// the import, so when the server's date is days after the message's own, the message's own wins.
+fn message_date(sent: i64, received: i64) -> i64 {
+    const IMPORTED_AFTER: i64 = 2 * 24 * 60 * 60;
+    if sent > 0 && received - sent > IMPORTED_AFTER { sent } else { received }
+}
+
 fn flags_of(fetch: &Fetch) -> Flags {
     let mut flags = Flags::default();
     for flag in fetch.flags() {
@@ -759,5 +866,19 @@ fn display_name(path: &str, delimiter: Option<&str>, role: Role) -> String {
         Role::Junk => "Junk".into(),
         Role::Archive => "Archive".into(),
         _ => super::decode_utf7(leaf(path, delimiter)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message_date;
+
+    #[test]
+    fn imported_mail_keeps_its_own_date() {
+        let day = 24 * 60 * 60;
+        assert_eq!(message_date(1_000_000, 1_000_060), 1_000_060, "normal delivery: when it arrived");
+        assert_eq!(message_date(1_000_000 + day, 1_000_000), 1_000_000, "sender's clock ahead: when it arrived");
+        assert_eq!(message_date(1_000_000, 1_000_000 + 400 * day), 1_000_000, "imported years later: its own date");
+        assert_eq!(message_date(0, 5_000), 5_000, "no date of its own");
     }
 }
