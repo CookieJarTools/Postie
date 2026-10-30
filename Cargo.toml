@@ -1,6 +1,6 @@
 [package]
 name = "postie"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A desktop mail client that sits in the tray and tells you when mail arrives."
 authors = ["Joseph Cook"]
