@@ -179,17 +179,53 @@ pub fn start_daemon() -> Result<()> {
         return Ok(());
     }
     use std::os::unix::process::CommandExt;
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(paths::data_dir().join("daemon.log"));
-    let stderr = log.map(Stdio::from).unwrap_or_else(|_| Stdio::null());
     Command::new(exe())
         .arg("daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(stderr)
+        .stderr(daemon_log())
         .process_group(0)
         .spawn()
         .context("starting the background service")?;
     Ok(())
+}
+
+fn daemon_log() -> Stdio {
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(paths::data_dir().join("daemon.log"));
+    log.map(Stdio::from).unwrap_or_else(|_| Stdio::null())
+}
+
+/// Whether systemd runs this process as Postie's own service. Started any other way, it may sit
+/// inside some other app's service, which mustn't be restarted.
+fn run_by_systemd() -> bool {
+    let unit = format!("/{SERVICE}");
+    std::fs::read_to_string("/proc/self/cgroup").is_ok_and(|cgroups| cgroups.lines().any(|line| line.ends_with(&unit)))
+}
+
+/// Starts the background service again, for when a newer Postie has replaced `binary`, the one this
+/// service started from. Under systemd that's a restart of the service, which stops this process
+/// too. Otherwise a small shell waits for this process to exit and then starts the new copy, so two
+/// never run at once. Returns whether this process has to quit by itself.
+pub fn restart_daemon(binary: &std::path::Path) -> Result<bool> {
+    if run_by_systemd() {
+        anyhow::ensure!(systemctl(&["--no-block", "restart", SERVICE]), "systemctl couldn't restart {SERVICE}");
+        return Ok(false);
+    }
+    // Once replaced, this process's own path reads "postie (deleted)", so start the one it came from.
+    let program = if std::env::var_os("APPIMAGE").is_some() { exe() } else { binary.to_path_buf() };
+    use std::os::unix::process::CommandExt;
+    Command::new("sh")
+        .arg("-c")
+        .arg(r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec "$0" daemon"#)
+        .arg(program)
+        .arg(std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(daemon_log())
+        .process_group(0)
+        .spawn()
+        .context("starting the new background service")?;
+    Ok(true)
 }
 
 /// Copies this binary to ~/.local/bin and sets up the launcher, icon and login item from there.

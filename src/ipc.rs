@@ -56,7 +56,14 @@ pub fn send(request: &Request) -> std::io::Result<()> {
     stream.write_all(line.as_bytes())?;
     let mut answer = String::new();
     BufReader::new(stream).read_line(&mut answer)?;
-    if answer.trim() == "ok" { Ok(()) } else { Err(std::io::Error::other(format!("daemon said {answer:?}"))) }
+    match answer.trim() {
+        "ok" => Ok(()),
+        // A newer Postie was installed and the daemon is restarting into it; it's back in a moment.
+        "restarting" => {
+            Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "the background service is restarting"))
+        }
+        _ => Err(std::io::Error::other(format!("daemon said {answer:?}"))),
+    }
 }
 
 pub fn daemon_running() -> bool {

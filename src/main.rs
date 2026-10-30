@@ -86,17 +86,21 @@ fn run(args: &[String]) -> Result<()> {
     }
 }
 
-/// Hands the request to the background service, starting it first if it isn't running.
+/// Hands the request to the background service, starting it first if it isn't running. If it's
+/// restarting into a newer version, it comes back by itself, so this waits for that instead.
 fn open(request: Request) -> Result<()> {
-    if ipc::send(&request).is_ok() {
-        return Ok(());
-    }
-    autostart::start_daemon()?;
-    for _ in 0..50 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if ipc::send(&request).is_ok() {
-            return Ok(());
+    let (mut restarting, mut started) = (false, false);
+    for _ in 0..200 {
+        match ipc::send(&request) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => restarting = true,
+            Err(_) if !restarting && !started => {
+                autostart::start_daemon()?;
+                started = true;
+            }
+            Err(_) => {}
         }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     anyhow::bail!("the background service didn't start; try `postie daemon` to see why")
 }

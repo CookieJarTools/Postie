@@ -6,9 +6,11 @@
 
 mod notify;
 mod tray;
+mod update;
 
 use std::collections::HashMap;
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -34,6 +36,9 @@ pub struct Hub {
     tray: Mutex<Option<ksni::Handle<tray::PostieTray>>>,
     runtime: tokio::runtime::Handle,
     quit: Notify,
+    /// The copy of Postie this service started from, to notice when a newer one replaces it.
+    program: update::Program,
+    restarting: AtomicBool,
 }
 
 impl Hub {
@@ -97,14 +102,42 @@ impl Hub {
         alive
     }
 
+    /// Whether a window is connected and hearing events.
+    fn window_listening(&self) -> bool {
+        let mut subscribers = self.subscribers.lock().unwrap();
+        subscribers.retain(|subscriber| !subscriber.is_closed());
+        !subscribers.is_empty()
+    }
+
+    /// Restarts into a newer copy of Postie if one has replaced this one. Not while a window is
+    /// open, which would lose the service mid-use: it waits until the window is closed. Returns
+    /// whether it's restarting.
+    fn restart_if_updated(&self) -> bool {
+        if self.restarting.load(Ordering::Relaxed) {
+            return true;
+        }
+        if self.window_open() || self.window_listening() || !self.program.replaced() {
+            return false;
+        }
+        log::info!("a newer Postie has been installed; restarting into it");
+        match autostart::restart_daemon(self.program.path()) {
+            Ok(quit_by_itself) => {
+                self.restarting.store(true, Ordering::Relaxed);
+                if quit_by_itself {
+                    self.quit();
+                }
+                true
+            }
+            Err(err) => {
+                log::warn!("couldn't restart into the newer Postie: {err:#}");
+                false
+            }
+        }
+    }
+
     /// Brings the window up, starting it if needed, and passes it `then` once it's listening.
     pub fn show(&self, then: Option<Event>) {
-        let listening = {
-            let mut subscribers = self.subscribers.lock().unwrap();
-            subscribers.retain(|subscriber| !subscriber.is_closed());
-            !subscribers.is_empty()
-        };
-        if listening {
+        if self.window_listening() {
             self.broadcast(Event::Focus);
             if let Some(event) = then {
                 self.broadcast(event);
@@ -151,8 +184,11 @@ impl Hub {
         self.update_tray(move |tray| tray.unread = unread);
     }
 
-    fn handle_request(self: &Arc<Self>, request: Request) {
+    /// Handles one request and gives the answer for the socket: `ok`, or `restarting` when a newer
+    /// Postie has been installed, and the new service will be the one to open the window.
+    fn handle_request(self: &Arc<Self>, request: Request) -> &'static str {
         match request {
+            Request::Show { .. } | Request::Compose { .. } if self.restart_if_updated() => return "restarting",
             Request::Ping | Request::Subscribe => {}
             Request::Show { message } => self.show(message.map(|message| Event::Open { message })),
             Request::Compose { to, subject, body } => self.show(Some(Event::Compose { to, subject, body })),
@@ -170,6 +206,7 @@ impl Hub {
             }
             Request::Quit => self.quit(),
         }
+        "ok"
     }
 }
 
@@ -203,6 +240,8 @@ async fn serve(socket: std::path::PathBuf) -> Result<()> {
         tray: Mutex::new(None),
         runtime: tokio::runtime::Handle::current(),
         quit: Notify::new(),
+        program: update::Program::current(),
+        restarting: AtomicBool::new(false),
     });
 
     match tray::spawn(hub.clone(), settings.do_not_disturb).await {
@@ -218,6 +257,7 @@ async fn serve(socket: std::path::PathBuf) -> Result<()> {
     let db = store::open()?;
     hub.refresh_unread(&db);
     let mut tick = tokio::time::interval(Duration::from_millis(400));
+    let mut update_check = tokio::time::interval(Duration::from_secs(60));
     let mut dirty = false;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
@@ -236,6 +276,9 @@ async fn serve(socket: std::path::PathBuf) -> Result<()> {
                     hub.broadcast(Event::Changed);
                     hub.refresh_unread(&db);
                 }
+            }
+            _ = update_check.tick() => {
+                hub.restart_if_updated();
             }
             _ = hub.quit.notified() => break,
             _ = terminate.recv() => break,
@@ -301,8 +344,8 @@ async fn client(stream: UnixStream, hub: Arc<Hub>) {
             }
             return;
         }
-        hub.handle_request(request);
-        if write.write_all(b"ok\n").await.is_err() {
+        let answer = hub.handle_request(request);
+        if write.write_all(format!("{answer}\n").as_bytes()).await.is_err() {
             return;
         }
     }

@@ -151,6 +151,8 @@ Running `postie` with no arguments asks the service to show the window, and star
 
 At login the service runs as the `postie.service` systemd user service, which also restarts it if it ever crashes. Desktops without systemd get an autostart entry instead.
 
+When a newer Postie replaces the one the service started from, as The Jar does when it updates it, the service restarts into the new version: straight away when you next open Postie, or within a minute of the window closing. It never restarts under an open window.
+
 </details>
 
 <details>
