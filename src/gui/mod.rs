@@ -6,6 +6,7 @@ mod html;
 mod icons;
 mod list;
 mod palette;
+mod preview;
 mod reader;
 mod settings;
 mod sidebar;
@@ -96,6 +97,9 @@ pub enum Action {
     Attach,
     SaveAttachment(i64, usize),
     OpenAttachment(i64, usize),
+    /// Shows an attachment in the large preview over the window.
+    PreviewAttachment(i64, usize),
+    ClosePreview,
     OpenInBrowser(i64),
     TogglePlain,
     /// The original view for the open message; `always` remembers its sender.
@@ -208,6 +212,10 @@ pub struct App {
     /// Images loaded for the original view, by their address in the message. Shared with the
     /// threads that fetch them.
     images: Arc<Mutex<HashMap<String, ImageState>>>,
+    /// Attachment thumbnails and previews.
+    previews: preview::Previews,
+    /// The attachment in the preview window, by message and attachment index.
+    pub preview_open: Option<(i64, usize)>,
     /// Set by POSTIE_SCREENSHOT: save the window's own pixels there after a few seconds, then
     /// quit. For the README's screenshots, unaffected by whatever is on top of the window.
     screenshot: Option<(PathBuf, bool)>,
@@ -259,6 +267,8 @@ impl App {
             title: String::new(),
             logo,
             images: Arc::new(Mutex::new(HashMap::new())),
+            previews: preview::Previews::default(),
+            preview_open: None,
             screenshot: std::env::var_os("POSTIE_SCREENSHOT").map(|path| (PathBuf::from(path), false)),
         };
         app.reload();
@@ -482,6 +492,7 @@ impl App {
 
     fn select(&mut self, id: i64) {
         let Ok(Some(detail)) = store::detail(&self.db, id) else { return };
+        self.previews.keep_only(id);
         if !detail.summary.seen && self.settings.mark_read_on_open {
             self.queue(id, Op::Seen(true));
         }
@@ -678,6 +689,17 @@ impl App {
             }
             Action::SaveAttachment(id, index) => self.save_attachment(ctx, id, index),
             Action::OpenAttachment(id, index) => self.open_attachment(id, index),
+            Action::PreviewAttachment(id, index) => {
+                if let Some((open, open_index)) = self.preview_open.filter(|&open| open != (id, index)) {
+                    self.previews.release(open, open_index);
+                }
+                self.preview_open = Some((id, index));
+            }
+            Action::ClosePreview => {
+                if let Some((id, index)) = self.preview_open.take() {
+                    self.previews.release(id, index);
+                }
+            }
             Action::OpenInBrowser(id) => self.open_in_browser(id),
             Action::ShowImages { always } => {
                 let Some(reader) = &mut self.reader else { return };
@@ -1022,7 +1044,8 @@ impl App {
             actions.push(Action::SyncNow);
         }
         let typing = ctx.egui_wants_keyboard_input();
-        if typing || self.palette.is_some() || self.dialog.is_some() || self.screen != Screen::Mail {
+        let covered = self.palette.is_some() || self.dialog.is_some() || self.preview_open.is_some();
+        if typing || covered || self.screen != Screen::Mail {
             return;
         }
         let selected = self.selected;
@@ -1205,6 +1228,7 @@ impl eframe::App for App {
         }
         self.load_images(&ctx);
         compose::window(self, &ctx, &mut actions);
+        preview::window(self, &ctx, &mut actions);
         palette::show(self, &ctx, &mut actions);
         settings::dialogs(self, &ctx, &mut actions);
         self.toasts(&ctx, &mut actions);

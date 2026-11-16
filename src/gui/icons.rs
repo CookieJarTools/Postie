@@ -27,6 +27,7 @@ pub enum Icon {
     Close,
     Refresh,
     ChevronDown,
+    ChevronLeft,
     ChevronRight,
     More,
     Clock,
@@ -273,6 +274,7 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(21.0, 3.0), (21.0, 8.0), (16.0, 8.0)]);
         }
         Icon::ChevronDown => pen.line(&[(6.0, 9.0), (12.0, 15.0), (18.0, 9.0)]),
+        Icon::ChevronLeft => pen.line(&[(15.0, 18.0), (9.0, 12.0), (15.0, 6.0)]),
         Icon::ChevronRight => pen.line(&[(9.0, 18.0), (15.0, 12.0), (9.0, 6.0)]),
         Icon::More => {
             pen.dot(5.0, 12.0, 1.6);

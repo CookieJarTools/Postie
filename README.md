@@ -61,7 +61,13 @@ Everything you do happens straight away, even when you're offline; Postie catche
 
 Emails open in a calm, simplified view with their images held back, because remote images let senders see when you've opened their mail. When you want to see an email the way it was designed, press **Show images**: it appears on a white page in the sender's own colours with its pictures in place. **Always for** that sender remembers your choice. **Open in browser** shows the exact original layout.
 
-Hovering a link shows where it really goes before you click it. Attachments open or save from the top of the message, and **Unsubscribe** appears whenever the sender offers one.
+Hovering a link shows where it really goes before you click it, and **Unsubscribe** appears whenever the sender offers one.
+
+### Attachments at a glance
+
+Attachments sit at the top of the message as cards, each with a little preview: the photo itself, the first page of a PDF, the opening lines of a text file. Click one to see it full size without leaving Postie: photos fit the window, PDFs scroll page by page, and CSV spreadsheets show as a table. **Open** hands it to its own app, **Save** keeps a copy, and ← and → step through the rest. Files Postie can't show, like Word documents, open straight in their own app.
+
+PDF previews use poppler's `pdftoppm`, which most Linux desktops already have. Without it, PDFs open in your PDF reader instead.
 
 If you find plain text easier to read in a fixed-width font, turn on **Monospace message text** in Settings.
 

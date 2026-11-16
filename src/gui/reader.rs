@@ -1,4 +1,4 @@
-use egui::{Align, CornerRadius, CursorIcon, Frame, Layout, Margin, Rect, Sense, Stroke, StrokeKind, Ui, vec2};
+use egui::{Align, CornerRadius, CursorIcon, Frame, Layout, Margin, Rect, Sense, Stroke, Ui, vec2};
 use rusqlite::Connection;
 
 use super::html::{self, Page, Piece, Rendered};
@@ -28,6 +28,12 @@ impl Reader {
 
     pub fn id(&self) -> i64 {
         self.detail.summary.id
+    }
+
+    /// The files attached to the message, leaving out the images that belong in its text.
+    pub fn attachments(&self) -> Vec<parse::Attachment> {
+        let Some(body) = &self.body else { return Vec::new() };
+        body.attachments.iter().filter(|attachment| !attachment.inline).cloned().collect()
     }
 
     pub fn refresh(&mut self, db: &Connection, detail: Detail) {
@@ -258,55 +264,11 @@ fn header(app: &App, reader: &Reader, ui: &mut Ui, out: &mut Vec<Action>) {
     if !files.is_empty() {
         ui.add_space(14.0);
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
             for attachment in files {
-                attachment_chip(ui, summary.id, attachment, out);
+                super::preview::card(app, ui, summary.id, attachment, out);
             }
         });
-    }
-}
-
-fn attachment_chip(ui: &mut Ui, id: i64, attachment: &parse::Attachment, out: &mut Vec<Action>) {
-    let name_galley = ui.painter().layout_no_wrap(attachment.name.clone(), theme::medium(12.5), FG);
-    let size = super::human_size(attachment.size as u64);
-    let size_galley = ui.painter().layout_no_wrap(size, theme::regular(11.5), FG_SUBTLE);
-    let width = (name_galley.size().x.min(220.0) + size_galley.size().x + 86.0).max(160.0);
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 40.0), Sense::click());
-    let hovered = response.hovered();
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(8),
-        if hovered { BG_HOVER } else { BG_PANEL },
-        Stroke::new(1.0, LINE_STRONG),
-        StrokeKind::Inside,
-    );
-    let icon = Rect::from_min_size(rect.left_top() + vec2(8.0, 8.0), vec2(24.0, 24.0));
-    ui.painter().rect_filled(icon, CornerRadius::same(6), BG_ACTIVE);
-    icons::paint(ui.painter(), icon.shrink(5.0), Icon::Paperclip, FG_MUTED);
-    widgets::paint_truncated(
-        ui,
-        rect.left_top() + vec2(40.0, 5.0),
-        &attachment.name,
-        theme::medium(12.5),
-        FG,
-        width - 80.0,
-    );
-    ui.painter().galley(rect.left_top() + vec2(40.0, 22.0), size_galley, FG_SUBTLE);
-
-    let save = Rect::from_center_size(rect.right_center() - vec2(20.0, 0.0), vec2(26.0, 26.0));
-    let save_response = ui.interact(save, ui.scope_id().with(("save", id, attachment.index)), Sense::click());
-    if save_response.hovered() {
-        ui.painter().rect_filled(save, CornerRadius::same(5), BG_PRESSED);
-    }
-    icons::paint(ui.painter(), save.shrink(6.0), Icon::Download, if save_response.hovered() { FG } else { FG_MUTED });
-    if save_response.on_hover_text("Save as…").on_hover_cursor(CursorIcon::PointingHand).clicked() {
-        out.push(Action::SaveAttachment(id, attachment.index));
-    } else if response
-        .on_hover_text(format!("Open {} ({})", attachment.name, attachment.mime))
-        .on_hover_cursor(CursorIcon::PointingHand)
-        .clicked()
-    {
-        out.push(Action::OpenAttachment(id, attachment.index));
     }
 }
 
