@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
-use lettre::Message;
+use anyhow::{Context, Result, anyhow, bail};
 use lettre::message::header::ContentType;
 use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart};
+use lettre::{Address, Message};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Account;
@@ -153,10 +153,23 @@ fn angle(id: &str) -> String {
 
 /// "Ann <ann@x.com>, bob@y.com; …" into mailboxes, naming the first one that doesn't parse.
 pub fn parse_recipients(text: &str) -> Result<Vec<Mailbox>> {
-    split_recipients(text)
-        .into_iter()
-        .map(|item| item.parse::<Mailbox>().with_context(|| format!("\"{item}\" isn't an email address")))
-        .collect()
+    split_recipients(text).iter().map(|item| parse_recipient(item)).collect()
+}
+
+/// One recipient. Strictly, a name with brackets, dots or other punctuation in it has to be in
+/// quotes, but senders' names often arrive that way (`Charlie Ward (Probate Operations)`), and
+/// people paste them in without a space before the `<`. So when the strict reading fails, the name
+/// is whatever comes before the `<`, and the message quotes it properly when it's built.
+fn parse_recipient(item: &str) -> Result<Mailbox> {
+    if let Ok(mailbox) = item.parse::<Mailbox>() {
+        return Ok(mailbox);
+    }
+    let invalid = || anyhow!("\"{item}\" isn't an email address");
+    let (name, rest) = item.rsplit_once('<').ok_or_else(invalid)?;
+    let address = rest.trim().strip_suffix('>').ok_or_else(invalid)?.trim();
+    let address: Address = address.parse().map_err(|_| invalid())?;
+    let name = name.trim().trim_matches('"').trim();
+    Ok(Mailbox::new((!name.is_empty()).then(|| name.to_owned()), address))
 }
 
 pub fn split_recipients(text: &str) -> Vec<String> {
@@ -277,6 +290,44 @@ mod tests {
             split_recipients("\"Cook, Joe\" <joe@x.com>, ann@y.com; bob@z.com"),
             vec!["\"Cook, Joe\" <joe@x.com>", "ann@y.com", "bob@z.com"]
         );
+    }
+
+    #[test]
+    fn accepts_names_that_need_quoting() {
+        let typed = [
+            "Charlie Ward (CLS-Probate Operations) <charlie.ward@coop.co.uk>",
+            "Charlie Ward (CLS-Probate Operations)<charlie.ward@coop.co.uk>",
+            "\"Ward, Charlie\" <charlie.ward@coop.co.uk>",
+            "Dr. Ann Lee <ann@x.com>",
+            "<charlie.ward@coop.co.uk>",
+            "charlie.ward@coop.co.uk",
+        ];
+        for item in typed {
+            let mailbox = parse_recipients(item).unwrap_or_else(|err| panic!("{item}: {err:#}"));
+            assert_eq!(mailbox.len(), 1, "{item}");
+        }
+        let mailbox = &parse_recipients("Charlie Ward (CLS-Probate Operations)<charlie.ward@coop.co.uk>").unwrap()[0];
+        assert_eq!(mailbox.name.as_deref(), Some("Charlie Ward (CLS-Probate Operations)"));
+        assert_eq!(mailbox.email.to_string(), "charlie.ward@coop.co.uk");
+        assert!(parse_recipients("Charlie <not an address>").is_err());
+        assert!(parse_recipients("just words").is_err());
+    }
+
+    #[test]
+    fn quotes_those_names_in_the_sent_message() {
+        let account = Account { name: "Joseph Cook".into(), email: "joe@example.com".into(), ..Default::default() };
+        let draft = Draft {
+            to: "Charlie Ward (CLS-Probate Operations) <charlie.ward@coop.co.uk>".into(),
+            subject: "Re: Probate".into(),
+            body: "Thanks".into(),
+            ..Default::default()
+        };
+        let built = build(&account, &draft).unwrap();
+        assert_eq!(built.recipients, ["charlie.ward@coop.co.uk"]);
+        let parsed = mail_parser::MessageParser::default().parse(&built.raw).unwrap();
+        let to = parsed.to().and_then(|to| to.first()).unwrap();
+        assert_eq!(to.name(), Some("Charlie Ward (CLS-Probate Operations)"));
+        assert_eq!(to.address(), Some("charlie.ward@coop.co.uk"));
     }
 
     #[test]
